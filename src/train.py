@@ -24,9 +24,9 @@ import torch.multiprocessing as mp
 import torch.backends.cudnn as cudnn
 
 from lib.loss.loss_manager import get_depth_loss
-from lib.models.bts import weights_init_xavier
+from lib.models.mybts_head import weights_init_xavier
 from lib.models.model_manager import ModelManager
-from lib.dataset.dataset import BtsDataLoader
+from lib.dataset.dataset import MyDataLoader
 
 from lib.utils.tools.logger import Logger as Log
 from lib.utils.distributed import get_world_size, get_rank, is_distributed
@@ -37,15 +37,12 @@ from src.tools.optim_scheduler import OptimScheduler
 from src.tools.utils import intersectionAndUnionGPU, ensure_path, AverageMeter
 
 
-eval_metrics = ['silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3']
-
 class Trainer(object):
     def __init__(self, configer):
         self.configer = configer
         
-        self.batch_time = AverageMeter()
+        # inialize the recorder
         self.train_losses = AverageMeter()
-        self.val_losses = AverageMeter()
         self.score_lower_better = torch.zeros(6).cpu() + 1e3
         self.score_higher_better = torch.zeros(3).cpu()   # keep track of scores
         
@@ -54,12 +51,9 @@ class Trainer(object):
         
         self.optim_scheduler = OptimScheduler(configer)
 
-        self.seg_net = None
         self.train_loader = None
         self.val_loader = None
         self.optimizer = None
-        self.scheduler = None
-        self.running_score = None
 
         self._init_model()
     
@@ -67,42 +61,52 @@ class Trainer(object):
         """
             Set up model, dataloader, optimizer, scheduler, loss
         """
-
+        # set model
         self.depth_net = self.model_manager.depth_estimator()
+        if torch.cuda.is_available():
+            self.depth_net.to('cuda')
+        else:
+            Log.info("GPU is not available!")
 
-        self.depth_net = self.module_runner.load_net(self.depth_net)
-
+        # initialize the decoder parameter
         self.depth_net.decoder.apply(weights_init_xavier)
         self.module_runner.set_misc(self.depth_net)
 
+        # check number of parameters
         num_params = sum([np.prod(p.size()) for p in self.depth_net.parameters()])
         Log.info("Total number of parameters: {}".format(num_params))
         num_params_update = sum([np.prod(p.shape) for p in self.depth_net.parameters() if p.requires_grad])
         Log.info("Total number of learning parameters: {}".format(num_params_update))
 
-        self.train_loader = BtsDataLoader(configer, 'train')
-        self.val_loader = BtsDataLoader(configer, 'online_eval')
+        # set dataloader
+        self.train_loader = MyDataLoader(configer, 'train')
+        self.val_loader = MyDataLoader(configer, 'online_eval')
 
         self.configer.set(['train', 'max_iters'], self.configer.get('num_epochs')*len(self.train_loader.data))
         Log.info('Total iterations {}'.format(self.configer.get('train', 'max_iters')))
 
-        opt = self.configer.get('optim', 'optimizer')
+
+        # do not train the fully connected layer
         encoder_param = []
         for name, param in self.depth_net.named_parameters():
-            # only consider encoder
+            
             if name[:7] == 'encoder':
                 if name != 'encoder.base_model.fc.weight' and name != 'encoder.base_model.fc.bias':
                     encoder_param.append(param)
                 else:
                     param.requires_grad = False
-                
+        
+        # get parameter groups
+        opt = self.configer.get('optim', 'optimizer')
         params_group = [
             {'params': encoder_param, 'weight_decay': self.configer.get('optim', opt)['weight_decay']},
             {'params': self.depth_net.decoder.parameters(), 'weight_decay': 0}
         ]
 
-        self.optimizer, self.scheduler = self.optim_scheduler.init_optimizer(params_group)
+        # set optimizer
+        self.optimizer, _ = self.optim_scheduler.init_optimizer(params_group)
 
+        # set criterion
         self.depth_loss = get_depth_loss(self.configer)
 
     def adjust_learning_rate(self, epoch):
@@ -124,12 +128,12 @@ class Trainer(object):
                 param_group["lr"] = lr
 
     def __train(self):
+        # set the model to tran mode
         self.depth_net.train()
         self.depth_loss.train()
         start_time = time.time()
-
-        # best_eval_steps = np.zeros(9, dtype=np.int32)
-
+        
+        # set learning rate
         if self.configer.get('lr', 'end_lr') != -1:
             end_lr = self.configer.get('lr', 'end_lr')
         else:
@@ -139,14 +143,9 @@ class Trainer(object):
 
         while self.configer.get('epoch') < self.configer.get('num_epochs'):
             batch_time = time.time()
+            # iterate through the dataloader
             for step, batchsample in enumerate(self.train_loader.data):
-                # adjust learning rate as scheduler
-
-                # for param_group in self.optimizer.param_groups:
-                #     current_lr = (self.configer.get('lr', 'base_lr') - self.configer.get('lr', 'end_lr')) \
-                #          * (1 - self.configer.get('iters') / num_total_steps) ** 0.9 + end_lr
-                #     param_group['lr'] = current_lr
-    
+                # per iter learning rate adjust
                 self.adjust_learning_rate(step / len(self.train_loader.data) + self.configer.get('epoch'))
 
                 before_op_time = time.time()
@@ -160,11 +159,13 @@ class Trainer(object):
                         image[:, :, slicing_idx[0]:slicing_idx[2], slicing_idx[1]:slicing_idx[3]] = x_sliced
                         depth_gt[:, :, slicing_idx[0]:slicing_idx[2], slicing_idx[1]:slicing_idx[3]] = y_sliced
 
+                # get the prediction
                 depth_est = self.depth_net(image)
 
                 # area in depth map with 0 value does not count for loss
                 mask = depth_gt > 0.1
-                pdb.set_trace()
+
+                # back prop
                 self.optimizer.zero_grad()
                 loss = self.depth_loss.forward(depth_est, depth_gt, mask.to(torch.bool))
                 loss.backward()
@@ -185,7 +186,7 @@ class Trainer(object):
 
                     self.train_losses.reset()
 
-                # check to val the current model
+                # do the validation
                 if self.configer.get('iters') % self.configer.get('eval', 'eval_freq') == 0:
                     Log.info("*** Start evaulating ***")
                     self.evaluate()
@@ -209,12 +210,15 @@ class Trainer(object):
         self.__train()
 
     def evaluate(self):
+        # set the model to eval mode
         start_time = time.time()
         self.depth_net.eval()
         self.depth_loss.eval()
+        # get the predefined metric scores
         ev_score = self.online_eval(self.configer.get('gpu')[0], torch.cuda.device_count())
         if ev_score is not None:
             for i in range(9):
+                # save the model w.r.t the different metric performance
                 measure = ev_score[i]
                 is_best = False
                 # lower is better
@@ -228,6 +232,7 @@ class Trainer(object):
                 if is_best:
                     self.module_runner.save_net(self.depth_net, save_mode='performance', pos=i)
 
+        # log the metric evaluation
         runtime = time.time() - start_time
         msg = '\n\nTesting: Ep {} | time {:.1f} mins\n'.format(self.configer.get('epoch'), runtime / 60)
         msg += 'silog {:.4f} | abs_rel {:.4f} | log10 {:.4f} | rms {:.4f} | sq_rel {:.4f} | log_rms {:.4f} '.format(
@@ -245,15 +250,16 @@ class Trainer(object):
     def online_eval(self, gpu, ngpus):
         eval_measures = torch.zeros(10).cuda(device=gpu)
         for _, eval_sample_batched in enumerate(self.val_loader.data):
+            # iterate through the validate loader
             with torch.no_grad():
                 image = torch.autograd.Variable(eval_sample_batched['image'].cuda(gpu, non_blocking=True))
-                # focal = torch.autograd.Variable(eval_sample_batched['focal'].cuda(gpu, non_blocking=True))
                 gt_depth = eval_sample_batched['depth']
                 has_valid_depth = eval_sample_batched['has_valid_depth']
 
                 if not has_valid_depth:
                     continue
-
+                
+                # get the prediction and remove the blank boundaries
                 pred_depth = self.depth_net(image).squeeze()
                 new_pred = torch.zeros(pred_depth.shape)
                 new_pred[45:472, 43:608] = pred_depth[45:472, 43:608]
@@ -262,6 +268,7 @@ class Trainer(object):
                 pred_depth = pred_depth.cpu().numpy()
                 gt_depth = gt_depth.cpu().numpy().squeeze()
 
+            # refine the prediction
             pred_depth[pred_depth < self.configer.get('eval', 'min_depth_eval')] = self.configer.get('eval', 'min_depth_eval')
             pred_depth[pred_depth > self.configer.get('eval', 'max_depth_eval')] = self.configer.get('eval', 'max_depth_eval')
             pred_depth[np.isinf(pred_depth)] = self.configer.get('eval', 'max_depth_eval')
@@ -271,6 +278,7 @@ class Trainer(object):
                 gt_depth > self.configer.get('eval', 'min_depth_eval'), 
                 gt_depth < self.configer.get('eval', 'max_depth_eval'))
 
+            # some further refinement
             if self.configer.get('eval', 'garg_crop') or self.configer.get('eval', 'eigen_crop'):
                 gt_height, gt_width = gt_depth.shape
                 eval_mask = np.zeros(valid_mask.shape)
@@ -279,19 +287,18 @@ class Trainer(object):
                     eval_mask[int(0.40810811 * gt_height):int(0.99189189 * gt_height), int(0.03594771 * gt_width):int(0.96405229 * gt_width)] = 1
 
                 elif self.configer.get('eval', 'eigen_crop'):
-                    if self.configer.get() == 'kitti':
-                        eval_mask[int(0.3324324 * gt_height):int(0.91351351 * gt_height), int(0.0359477 * gt_width):int(0.96405229 * gt_width)] = 1
-                    else:
-                        eval_mask[45:471, 41:601] = 1
+                    eval_mask[45:471, 41:601] = 1
 
                 valid_mask = np.logical_and(valid_mask, eval_mask)
 
+            # get the metric
+            # metrics include: ['loss', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3']
             measures = self.compute_errors(gt_depth[valid_mask], pred_depth[valid_mask])
 
             eval_measures[:9] += torch.tensor(measures).cuda(device=gpu)
             eval_measures[9] += 1
 
-
+        # gather the metircs
         eval_measures_cpu = eval_measures.cpu()
         cnt = eval_measures_cpu[9].item()
         eval_measures_cpu /= cnt
@@ -324,7 +331,6 @@ class Trainer(object):
     def rand_bbox(self, size, lam):
         W = size[2]
         H = size[3]
-        # cut_rat = np.sqrt(1. - lam)
         cut_rat = lam
         cut_w = np.int64(W * cut_rat)
         cut_h = np.int64(H * cut_rat)
@@ -341,7 +347,6 @@ class Trainer(object):
         return bbx1, bby1, bbx2, bby2
 
     def cutmix_data(self, x, y):
-        # lam = np.random.beta(1.0, 1.0)
         # fix cut ratio to 0.5
         lam = 0.5
         batch_size = x.size()[0]
@@ -366,9 +371,10 @@ def parse_config():
     return Configer(parser.parse_args())
 
 if __name__ == "__main__":
-
+    # get configer
     configer = parse_config()
 
+    # fix seed
     seed = configer.get('manual_seed')
     if seed is not None:
         cudnn.benchmark = False
@@ -379,12 +385,14 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+    # set the save path
     project_dir = os.path.dirname(os.path.realpath(__file__))
     configer.set(['project_dir'], project_dir)
     save_path = f"./results/{datetime.date.today()}:{configer.get('exp_name')}/{configer.get('exp_id')}"
     save_flag = ensure_path(save_path)
     configer.set(['save_path'], save_path)
 
+    # initialize the log output file
     Log.init(
         log_file=os.path.join(save_path, 'output.log'),
         logfile_level='info',
@@ -397,9 +405,11 @@ if __name__ == "__main__":
     if configer.get('debug'):
         Log.info('***** Debugging Mode *****')
 
+    # log the modified configs
     configer.log_config()
     configer.log_modified_config()
 
+    # set device
     if torch.cuda.is_available():
         configer.set(('gpu', ), [0])
     else:
@@ -408,5 +418,6 @@ if __name__ == "__main__":
     global get
     get = Get(configer)
 
+    # train the model
     model = Trainer(configer)
     model.train()

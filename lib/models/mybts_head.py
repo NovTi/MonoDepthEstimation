@@ -117,9 +117,9 @@ class reduction_1x1(nn.Sequential):
         return net
 
 
-class bts(nn.Module):
+class MyBTS_Decoder(nn.Module):
     def __init__(self, feat_out_channels, num_features=512):
-        super(bts, self).__init__()
+        super(MyBTS_Decoder, self).__init__()
         # dense feature
         self.upconv4    = upconv(feat_out_channels[4], feat_out_channels[3])
         self.bn4        = nn.BatchNorm2d(feat_out_channels[3], momentum=0.01, affine=True, eps=1.1e-5)
@@ -171,22 +171,22 @@ class bts(nn.Module):
         dense_features = self.upconv4(dense_features) # H/16
         dense_features = self.bn4(dense_features)
         dense_concat = torch.cat([dense_features, skip3], dim=1)
-        dense_concat = self.conv4(dense_concat)   # [B, 1024, 26, 34]
+        dense_concat = self.conv4(dense_concat)    # [B, 1024, 26, 34]
 
-        dense_concat = self.ppm(dense_concat)  # [B, 512, 26, 34]
+        dense_concat = self.ppm(dense_concat)     # [B, 512, 26, 34]
 
         # lpg for concat3, expand 8 times
-        reduc8x8 = self.reduc8x8(dense_concat)   # [B, 4, 26, 34]
-        plane_normal_8x8 = reduc8x8[:, :3, :, :]   # [B, 3, 26, 34]
+        reduc8x8 = self.reduc8x8(dense_concat)      # [B, 4, 26, 34]
+        plane_normal_8x8 = reduc8x8[:, :3, :, :]    # [B, 3, 26, 34]
         plane_normal_8x8 = F.normalize(plane_normal_8x8, 2, 1)
         plane_dist_8x8 = reduc8x8[:, 3, :, :]    # [B, 1, 26, 34]
         plane_eq_8x8 = torch.cat([plane_normal_8x8, plane_dist_8x8.unsqueeze(1)], 1)  # [B, 4, 26, 34]
-        depth_8x8_scaled = self.upconv_depth8(plane_eq_8x8) / 10.0 # [B, 1, 208, 272]
+        depth_8x8_scaled = self.upconv_depth8(plane_eq_8x8) / 10.0    # [B, 1, 208, 272]
 
-        concat3 = self.upconv3(dense_concat)  # [B, 512, 52, 68]
-        conv2 = self.conv2(skip2)      # [B, 512, 52, 68]
-        concat2 = torch.cat([conv2, concat3], dim=1)   # [B, 1024, 52, 68]
-        concat2 = self.concat2_conv(concat2)    # [B, 512, 52, 68]
+        concat3 = self.upconv3(dense_concat)   # [B, 512, 52, 68]
+        conv2 = self.conv2(skip2)        # [B, 512, 52, 68]
+        concat2 = torch.cat([conv2, concat3], dim=1)    # [B, 1024, 52, 68]
+        concat2 = self.concat2_conv(concat2)      # [B, 512, 52, 68]
         concat2 = self.bn2(concat2)
 
         # lpg for concat4, expand 4 times
@@ -222,15 +222,15 @@ class bts(nn.Module):
         return final_depth
 
 
-class encoder(nn.Module):
+class Encoder(nn.Module):
     def __init__(self):
-        super(encoder, self).__init__()
+        super(Encoder, self).__init__()
         import torchvision.models as models
-        if get('network', 'encoder') == 'resnet50_bts2':
+        if get('network', 'encoder') == 'resnet50_mybts':
             self.base_model = models.resnet50(pretrained=True)
             self.feat_names = ['relu', 'layer1', 'layer2', 'layer3', 'layer4']
             self.feat_out_channels = [64, 256, 512, 1024, 2048]
-        elif get('network', 'encoder') == 'resnet101_bts2':
+        elif get('network', 'encoder') == 'resnet101_mybts':
             self.base_model = models.resnet101(pretrained=True)
             self.feat_names = ['relu', 'layer1', 'layer2', 'layer3', 'layer4']
             self.feat_out_channels = [64, 256, 512, 1024, 2048]
@@ -241,31 +241,29 @@ class encoder(nn.Module):
         feature = x
         skip_feat = []
         i = 1
+        # get the intermediate features
         for k, v in self.base_model._modules.items():
             if 'fc' in k or 'avgpool' in k:
                 continue
             feature = v(feature)
-            if get('network', 'encoder') == 'mobilenetv2_bts':
-                if i == 2 or i == 4 or i == 7 or i == 11 or i == 19:
-                    skip_feat.append(feature)
-            else:
-                if any(x in k for x in self.feat_names):
-                    skip_feat.append(feature)
+            if any(x in k for x in self.feat_names):
+                skip_feat.append(feature)
             i = i + 1
         return skip_feat
     
 
-class Bts2Model(nn.Module):
+class MyBtsModel(nn.Module):
     def __init__(self, configer):
+        super(MyBtsModel, self).__init__()
         global get
         get = Get(configer)
-        super(Bts2Model, self).__init__()
-        self.encoder = encoder()
-        self.decoder = bts(self.encoder.feat_out_channels, get('train', 'bts_size'))
+        # set encoder
+        self.encoder = Encoder()
+        # set decoder
+        self.decoder = MyBTS_Decoder(self.encoder.feat_out_channels, get('train', 'bts_size'))
 
     def forward(self, x):
         # x: [B, 3, 416, 544]
         skip_feat = self.encoder(x)
-        # pdb.set_trace()
         return self.decoder(skip_feat)
     

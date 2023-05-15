@@ -26,14 +26,13 @@ from src.configer import Configer, Get
 from src.tools.utils import ensure_path, AverageMeter
 
 
-eval_metrics = ['silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3']
-
 class Tester(object):
     def __init__(self, configer):
         self.configer = configer
-        
+
+        # keep track of the scores
         self.score_lower_better = torch.zeros(6).cpu() + 1e3
-        self.score_higher_better = torch.zeros(3).cpu()   # keep track of the scores
+        self.score_higher_better = torch.zeros(3).cpu()
         
         self.model_manager = ModelManager(configer=configer)
 
@@ -46,6 +45,7 @@ class Tester(object):
         # load net from configs
         self.depth_net = self.model_manager.depth_estimator()
 
+        # move the model to cuda
         if torch.cuda.is_available():
             self.depth_net.cuda()
         else:
@@ -69,21 +69,14 @@ class Tester(object):
         Log.info('***** Start Testing *****')
 
         start_time = time.time()
+        # move the model to evaluation mode
         self.depth_net.eval()
-        ev_score = self.online_test(self.configer.get('gpu')[0], torch.cuda.device_count())
-        if ev_score is not None:
-            for i in range(9):
-                measure = ev_score[i]
-                is_best = False
-                # lower is better
-                if i < 6 and measure < self.score_lower_better[i]:
-                    self.score_lower_better[i] = measure.item()
-                    is_best = True
-                # higher is better
-                elif i >= 6 and measure > self.score_higher_better[i-6]:
-                    self.score_higher_better[i-6] = measure.item()
-                    is_best = True
 
+        # get the evulation scores
+        # scores include: ['silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3']
+        ev_score = self.online_test(self.configer.get('gpu')[0], torch.cuda.device_count())
+        
+        # log the evaluationn scores
         runtime = time.time() - start_time
         msg = '\nTesting Results: Time: {:.1f} mins | Metrics:\n'.format(runtime / 60)
         msg += 'loss {:.4f} | abs_rel {:.4f} | log10 {:.4f} | rms {:.4f} | sq_rel {:.4f} | log_rms {:.4f} '.format(
@@ -98,8 +91,10 @@ class Tester(object):
     def online_test(self, gpu, ngpus):
         eval_measures = torch.zeros(10).cuda(device=gpu)
         for idx, eval_sample_batched in enumerate(self.test_loader.data):
+            # iterate through the test loader
             if idx % (len(self.test_loader.data) // 10) == 0:
                 Log.info(f"  Current iter: {idx} | Total {len(self.test_loader.data)} iters")
+
             with torch.no_grad():
                 image = torch.autograd.Variable(eval_sample_batched['image'].cuda(gpu, non_blocking=True))
                 gt_depth = eval_sample_batched['depth']
@@ -108,6 +103,7 @@ class Tester(object):
                 if not has_valid_depth:
                     continue
 
+                # get the prediction
                 pred_depth = self.depth_net(image).squeeze()
                 new_pred = torch.zeros(pred_depth.shape)
                 new_pred[45:472, 43:608] = pred_depth[45:472, 43:608]
@@ -116,6 +112,7 @@ class Tester(object):
                 pred_depth = pred_depth.cpu().numpy()
                 gt_depth = gt_depth.cpu().numpy().squeeze()
 
+            # refine the prediction
             pred_depth[pred_depth < self.configer.get('eval', 'min_depth_eval')] = self.configer.get('eval', 'min_depth_eval')
             pred_depth[pred_depth > self.configer.get('eval', 'max_depth_eval')] = self.configer.get('eval', 'max_depth_eval')
             pred_depth[np.isinf(pred_depth)] = self.configer.get('eval', 'max_depth_eval')
@@ -125,6 +122,7 @@ class Tester(object):
                 gt_depth > self.configer.get('eval', 'min_depth_eval'), 
                 gt_depth < self.configer.get('eval', 'max_depth_eval'))
 
+            # furthur refine the prediction
             if self.configer.get('eval', 'garg_crop') or self.configer.get('eval', 'eigen_crop'):
                 gt_height, gt_width = gt_depth.shape
                 eval_mask = np.zeros(valid_mask.shape)
@@ -133,10 +131,7 @@ class Tester(object):
                     eval_mask[int(0.40810811 * gt_height):int(0.99189189 * gt_height), int(0.03594771 * gt_width):int(0.96405229 * gt_width)] = 1
 
                 elif self.configer.get('eval', 'eigen_crop'):
-                    if self.configer.get() == 'kitti':
-                        eval_mask[int(0.3324324 * gt_height):int(0.91351351 * gt_height), int(0.0359477 * gt_width):int(0.96405229 * gt_width)] = 1
-                    else:
-                        eval_mask[45:471, 41:601] = 1
+                    eval_mask[45:471, 41:601] = 1
 
                 valid_mask = np.logical_and(valid_mask, eval_mask)
 
@@ -145,6 +140,7 @@ class Tester(object):
             eval_measures[:9] += torch.tensor(measures).cuda(device=gpu)
             eval_measures[9] += 1
 
+        # return the evaluation scores
         eval_measures_cpu = eval_measures.cpu()
         cnt = eval_measures_cpu[9].item()
         eval_measures_cpu /= cnt
@@ -185,10 +181,12 @@ def parse_config():
 
 
 if __name__ == "__main__":
-
+    # get configer
     configer = parse_config()
+    # set data path
     configer.set(['data', 'data_path'], configer.get('datapath'))
 
+    # fix seed
     seed = configer.get('manual_seed')
     if seed is not None:
         cudnn.benchmark = False
@@ -199,6 +197,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+    # initialize the log output file
     project_dir = os.path.dirname(os.path.realpath(__file__))
     configer.set(['project_dir'], project_dir)
     save_path = f"./results/{datetime.date.today()}:{configer.get('exp_name')}/{configer.get('exp_id')}"
@@ -218,5 +217,6 @@ if __name__ == "__main__":
     global get
     get = Get(configer)
 
+    # testing
     model = Tester(configer)
     model.test()

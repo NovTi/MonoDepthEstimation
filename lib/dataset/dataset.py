@@ -11,12 +11,11 @@ import numpy as np
 import torch.utils.data.distributed
 
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
 
 from src.configer import Get
-# from lib.dataset.dist_sampler import *
-# from lib.utils.distributed import is_distributed
+from lib.utils.tools.logger import Logger as Log
 
 
 def _is_pil_image(img):
@@ -33,20 +32,20 @@ def preprocessing_transforms(mode):
     ])
 
 
-class BtsDataLoader(object):
+class MyDataLoader(object):
     def __init__(self, configer, mode):
         global get
         get = Get(configer)
 
+        # train set
         if mode == 'train':
             self.training_samples = DataLoadPreprocess(mode, transform=preprocessing_transforms(mode))
-            self.train_sampler = None
             self.data = DataLoader(self.training_samples, get('train', 'batch_size'),
-                                   shuffle=(self.train_sampler is None),
+                                   shuffle=True,
                                    num_workers=get('distributed', 'num_threads'),
-                                   pin_memory=True,
-                                   sampler=self.train_sampler)
+                                   pin_memory=True)
 
+        # evaluation set
         elif mode == 'online_eval':
             self.testing_samples = DataLoadPreprocess(mode, transform=preprocessing_transforms(mode))
             self.eval_sampler = None
@@ -56,6 +55,7 @@ class BtsDataLoader(object):
                                    pin_memory=True,
                                    sampler=self.eval_sampler)
         
+        # test set
         elif mode == 'test':
             self.testing_samples = DataLoadPreprocess(mode, transform=preprocessing_transforms(mode))
             self.testing_samples[0]
@@ -67,11 +67,18 @@ class BtsDataLoader(object):
             
 class DataLoadPreprocess(Dataset):
     def __init__(self, mode, transform=None, is_for_online_eval=False):
+        # eval set
         if mode == 'online_eval':
             with open(get('eval', 'file_lst_eval'), 'r') as f:
                 self.filenames = f.readlines()
+        # train set
+        elif mode == 'train':
+            with open(get('data', 'file_lst'), 'r') as f:
+                self.filenames = f.readlines()
+        # test set
         else:
             self.filenames = []
+            # list all images in the given folder
             files = self.list_all_files(get('data', 'data_path'))
             for file in files:
                 lst = file.split('/')
@@ -88,26 +95,26 @@ class DataLoadPreprocess(Dataset):
         sample_path = self.filenames[idx]
         focal = float(sample_path.split()[2])
 
+        # train set
         if self.mode == 'train':
-            if get('data', 'dataset') == 'kitti' and get('augment', 'use_right') is True and random.random() > 0.5:
-                image_path = os.path.join(get('data', 'data_path'), "./" + sample_path.split()[3])
-                depth_path = os.path.join(get('data', 'gt_path'), "./" + sample_path.split()[4])
-            else: # nyu v2
-                image_path = os.path.join(get('data', 'data_path'), "./" + sample_path.split()[0])
-                depth_path = os.path.join(get('data', 'gt_path'), "./" + sample_path.split()[1])
-    
+            image_path = os.path.join(get('data', 'data_path'), "./" + sample_path.split()[0])
+            depth_path = os.path.join(get('data', 'gt_path'), "./" + sample_path.split()[1])
+
+            # get the image and depth map
             image = Image.open(image_path)
             depth_gt = Image.open(depth_path)
             
             # To avoid blank boundaries due to pixel registration
             depth_gt = depth_gt.crop((43, 45, 608, 472))
             image = image.crop((43, 45, 608, 472))
-    
+
+            # random rotation augmentation
             if get('augment', 'random_rotate') is True:
                 random_angle = (random.random() - 0.5) * 2 * get('augment', 'degree')
                 image = self.rotate_image(image, random_angle)
                 depth_gt = self.rotate_image(depth_gt, random_angle, flag=Image.NEAREST)
             
+            # adjust image and depth map
             image = np.asarray(image, dtype=np.float32) / 255.0
             depth_gt = np.asarray(depth_gt, dtype=np.float32)
             depth_gt = np.expand_dims(depth_gt, axis=2)
@@ -119,37 +126,37 @@ class DataLoadPreprocess(Dataset):
             image, depth_gt = self.train_preprocess(image, depth_gt)
             sample = {'image': image, 'depth': depth_gt, 'focal': focal}
         
+        # eval set and test set
         else:
             if self.mode == 'online_eval':
                 data_path = get('eval', 'data_path_eval')
-            else:
+            else: # for testing
                 data_path = get('data', 'data_path')
-
+            
+            # get the image
             image_path = os.path.join(data_path, "./" + sample_path.split()[0])
             image = np.asarray(Image.open(image_path), dtype=np.float32) / 255.0
 
-            # if self.mode == 'online_eval':
             gt_path = get('eval', 'gt_path_eval')
             depth_path = os.path.join(gt_path, "./" + sample_path.split()[1])
             has_valid_depth = False
-            
+        
+            # get the depth map
             try:
                 depth_gt = Image.open(depth_path)
                 has_valid_depth = True
             except IOError:
                 depth_gt = False
-                # print('Missing gt for {}'.format(image_path))
+                Log.info('Missing gt for {}'.format(image_path))
 
+            # adjust depth map
             if has_valid_depth:
                 depth_gt = np.asarray(depth_gt, dtype=np.float32)
                 depth_gt = np.expand_dims(depth_gt, axis=2)
                 # nyuv2 ratio
                 depth_gt = depth_gt / 1000.0
 
-            # if self.mode == 'online_eval':
             sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth}
-            # else:
-            #     sample = {'image': image, 'focal': focal}
         
         if self.transform:
             sample = self.transform(sample)

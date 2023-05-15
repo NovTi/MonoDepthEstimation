@@ -12,16 +12,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-# So far just BTS, will add more nets or backbone later
-##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-from lib.models.bts import BtsModel
-from lib.models.bts2 import Bts2Model
+from lib.models.mybts_head import MyBtsModel
+from lib.models.dinov2.vision_transformer import DinoVisionTransformer
 
 MODEL_DICT = {
-    'bts': BtsModel,
-    'bts2': Bts2Model,
+    'mybts': MyBtsModel,
+    'dinov2': DinoVisionTransformer
 }
 
 class ModelManager(object):

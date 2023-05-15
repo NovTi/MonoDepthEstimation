@@ -34,8 +34,8 @@ CONFIG = {
 	},
 
 	"network": {
-		'model_name': 'bts2',
-		"encoder": "resnet50_bts2"
+		'model_name': 'mybts',
+		"encoder": "resnet50_mybts"
 	},
 
 	"eval": {

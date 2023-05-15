@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 from torch.nn.parallel.scatter_gather import gather as torch_gather
 
-from lib.models.bts import bn_init_as_tf
 from lib.utils.tools.logger import Logger as Log
 from lib.utils.distributed import get_rank, is_distributed
 
@@ -98,10 +97,6 @@ class ModuleRunner(object):
         return net
 
     def set_misc(self, net):
-        if self.configer.get('train', 'bn_no_track_stats'):
-            Log.info("Disabling tracking running stats in batch norm layers")
-            net.apply(bn_init_as_tf)
-
         if self.configer.get('train', 'fix_first_conv_blocks'):
             if 'resne' in args.encoder:
                 fixing_layers = ['base_model.conv1', 'base_model.layer1.0', 'base_model.layer1.1', '.bn']
