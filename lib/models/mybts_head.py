@@ -165,7 +165,7 @@ class MyBTS_Decoder(nn.Module):
 
     def forward(self, features):
         skip0, skip1, skip2, skip3 = features[0], features[1], features[2], features[3]
-
+        
         # use ppm module to handle the dense deep feature
         dense_features = torch.nn.ReLU()(features[4])
         dense_features = self.upconv4(dense_features) # H/16
@@ -181,7 +181,7 @@ class MyBTS_Decoder(nn.Module):
         plane_normal_8x8 = F.normalize(plane_normal_8x8, 2, 1)
         plane_dist_8x8 = reduc8x8[:, 3, :, :]    # [B, 1, 26, 34]
         plane_eq_8x8 = torch.cat([plane_normal_8x8, plane_dist_8x8.unsqueeze(1)], 1)  # [B, 4, 26, 34]
-        depth_8x8_scaled = self.upconv_depth8(plane_eq_8x8) / 10.0    # [B, 1, 208, 272]
+        depth_8x8_scaled = self.upconv_depth8(plane_eq_8x8) # / 10.0    # [B, 1, 208, 272]
 
         concat3 = self.upconv3(dense_concat)   # [B, 512, 52, 68]
         conv2 = self.conv2(skip2)        # [B, 512, 52, 68]
@@ -195,7 +195,7 @@ class MyBTS_Decoder(nn.Module):
         plane_normal_4x4 = F.normalize(plane_normal_4x4, 2, 1)
         plane_dist_4x4 = reduc4x4[:, 3, :, :]    # [B, 1, 52, 68]
         plane_eq_4x4 = torch.cat([plane_normal_4x4, plane_dist_4x4.unsqueeze(1)], 1)  # [B, 4, 52, 68]
-        depth_4x4_scaled = self.upconv_depth4(plane_eq_4x4) / 10.0  # [4, 1, 208, 272]
+        depth_4x4_scaled = self.upconv_depth4(plane_eq_4x4) #  / 10.0  # [4, 1, 208, 272]
 
         concat2 = self.upconv2(concat2)   # [B, 256, 52, 68]
         conv1 = self.conv1(skip1)      # [B, 512, 52, 68]
@@ -209,13 +209,13 @@ class MyBTS_Decoder(nn.Module):
         plane_normal_2x2 = F.normalize(plane_normal_2x2, 2, 1)
         plane_dist_2x2 = reduc2x2[:, 3, :, :]   # [B, 1, 104, 136]
         plane_eq_2x2 = torch.cat([plane_normal_2x2, plane_dist_2x2.unsqueeze(1)], 1)  # [B, 4, 104, 136]
-        depth_2x2_scaled = self.upconv_depth2(plane_eq_2x2) / 10.0  # [B, 1, 208, 272]
+        depth_2x2_scaled = self.upconv_depth2(plane_eq_2x2) # / 10.0  # [B, 1, 208, 272]
 
         # final
         upconv = self.upconv(concat1)  # [B, 512, 208, 272]
         upconv2x2 = self.upconv_depth_2x2(depth_2x2_scaled)  # [B, 1, 208, 272]
         upconv4x4 = self.upconv_depth_4x4(depth_4x4_scaled)  # [B, 1, 208, 272]
-        final = torch.cat([upconv, depth_8x8_scaled, upconv4x4, upconv2x2], 1)  # [B, 515, 104, 136]
+        final = torch.cat([upconv, depth_8x8_scaled, upconv4x4, upconv2x2], 1)  # [B, 515, 208, 272]
         final = self.conv(final)
         final_depth = 10.0 * self.get_depth(final)
         final_depth = F.interpolate(final_depth, scale_factor=2.0, mode='bilinear', align_corners=True)

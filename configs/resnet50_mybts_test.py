@@ -7,7 +7,7 @@ CONFIG = {
 	"method": "fcn_segmentor",
 	"num_epochs": 50,
 	"gpu": [0],
-	"weight_dir": 'results/2023-05-14:resnet50/r50_nocutmix_gradient_ppm_nofocal_div10/max_performance_rms.pth',
+	"weight_dir": 'results/best/max_performance_rms.pth',
 
 	"data": {
 		"dataset": "nyu",

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.utils as utils
 import torch.backends.cudnn as cudnn
 
-from lib.dataset.dataset import BtsDataLoader
+from lib.dataset.dataset import MyDataLoader
 from lib.loss.loss_manager import get_depth_loss
 from lib.models.model_manager import ModelManager
 
@@ -57,7 +57,7 @@ class Tester(object):
         Log.info(f"DepthNet Load Weight: {msg}")
         
         # get test loader
-        self.test_loader = BtsDataLoader(configer, 'test')
+        self.test_loader = MyDataLoader(configer, 'test')
 
         # freeze the model parameters
         for name, param in self.depth_net.named_parameters():
@@ -173,8 +173,8 @@ class Tester(object):
 
 def parse_config():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True, type=str, help='config file path')
     parser.add_argument('--datapath', required=True, type=str, help='test data path')
+    parser.add_argument('--config', default='configs/resnet50_mybts_test.py', help='config file path')
     parser.add_argument('--exp_name', default='test', help='experiment name')
     parser.add_argument('--exp_id', default='test', help='config modifications')
     return Configer(parser.parse_args())
